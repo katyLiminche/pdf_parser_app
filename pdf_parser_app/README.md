@@ -34,12 +34,16 @@ git clone https://github.com/katyLiminche/pdf_parser_app.git
 cd pdf_parser_app
 ```
 
-### 2. Создание виртуального окружения
+### 2. Активация виртуального окружения
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # Linux/Mac
+# Автоматическая активация (рекомендуется)
+./activate.sh
+
+# Или вручную
+python3 -m venv .venv
+source .venv/bin/activate  # Linux/Mac
 # или
-venv\Scripts\activate     # Windows
+.venv\Scripts\activate     # Windows
 ```
 
 ### 3. Установка зависимостей
