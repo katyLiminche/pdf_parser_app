@@ -22,6 +22,11 @@ class AppConfig:
     fuzzy_threshold_suggest: int = 70
     min_text_length: int = 20
     
+    # OCR settings
+    use_ocr: bool = True
+    ocr_languages: tuple = ("ru", "en")
+    ocr_gpu: bool = False
+    
     # File monitoring
     inbox_folder: str = "inbox"
     supported_extensions: tuple = (".pdf",)

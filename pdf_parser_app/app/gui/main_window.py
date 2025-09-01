@@ -185,6 +185,11 @@ class MainWindow(QMainWindow):
         self.file_list.itemClicked.connect(self.on_file_selected)
         left_layout.addWidget(self.file_list)
         
+        # File status label
+        self.file_status_label = QLabel("0 file(s)")
+        self.file_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        left_layout.addWidget(self.file_status_label)
+        
         # Buttons
         button_layout = QHBoxLayout()
         
@@ -363,12 +368,14 @@ class MainWindow(QMainWindow):
         """Setup bottom action buttons"""
         button_layout = QHBoxLayout()
         
-        # OCR Toggle
-        self.ocr_checkbox = QCheckBox("Использовать OCR для обработки")
-        self.ocr_checkbox.setChecked(self.config.use_ocr)
-        self.ocr_checkbox.stateChanged.connect(self.on_ocr_toggle)
-        button_layout.addWidget(self.ocr_checkbox)
-
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        button_layout.addWidget(self.progress_bar)
+        
+        button_layout.addStretch()
+        
         # Export button
         self.export_button = QPushButton("Export to Excel")
         self.export_button.clicked.connect(self.export_to_excel)
@@ -379,8 +386,6 @@ class MainWindow(QMainWindow):
         settings_button = QPushButton("Settings")
         settings_button.clicked.connect(self.show_settings)
         button_layout.addWidget(settings_button)
-        
-        button_layout.addStretch()
         
         parent_layout.addLayout(button_layout)
     
@@ -713,14 +718,10 @@ class MainWindow(QMainWindow):
             "A tool for parsing PDF documents and extracting structured data."
         )
 
-    def on_ocr_toggle(self, state):
-        """Handle OCR toggle state change"""
-        self.config.use_ocr = state == Qt.Checked
-        logger.info(f"OCR toggled to: {self.config.use_ocr}")
-
     def on_ocr_toggled(self, state):
         """Handle OCR checkbox toggle"""
         use_ocr = state == Qt.Checked
+        self.config.use_ocr = use_ocr
         self.parser.toggle_ocr(use_ocr)
         
         if use_ocr:
@@ -775,6 +776,39 @@ class MainWindow(QMainWindow):
         if self.en_lang_checkbox.isChecked():
             languages.append('en')
         return languages if languages else ['ru', 'en']
+    
+    def display_items(self, items: List[Dict[str, Any]]):
+        """Display extracted items in table"""
+        if not items:
+            return
+        
+        # Clear existing items
+        self.items_table.setRowCount(0)
+        
+        # Add items to table
+        for row, item in enumerate(items):
+            self.items_table.insertRow(row)
+            
+            # Set item data
+            self.items_table.setItem(row, 0, QTableWidgetItem(str(item.get('supplier_name', ''))))
+            self.items_table.setItem(row, 1, QTableWidgetItem(str(item.get('name', ''))))
+            self.items_table.setItem(row, 2, QTableWidgetItem(str(item.get('quantity', ''))))
+            self.items_table.setItem(row, 3, QTableWidgetItem(str(item.get('unit', ''))))
+            self.items_table.setItem(row, 4, QTableWidgetItem(str(item.get('price', ''))))
+            self.items_table.setItem(row, 5, QTableWidgetItem(str(item.get('currency', ''))))
+            self.items_table.setItem(row, 6, QTableWidgetItem(str(item.get('total', ''))))
+            self.items_table.setItem(row, 7, QTableWidgetItem(str(item.get('sku', ''))))
+            self.items_table.setItem(row, 8, QTableWidgetItem(str(item.get('source', ''))))
+            self.items_table.setItem(row, 9, QTableWidgetItem(str(item.get('confidence', ''))))
+        
+        # Switch to parsed table tab
+        self.tab_widget.setCurrentIndex(1)
+    
+    def update_progress(self, value: int):
+        """Update progress bar"""
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setValue(value)
+            self.progress_bar.setVisible(True)
     
     def process_file_with_ocr(self, file_path: str):
         """Process file with OCR support"""
