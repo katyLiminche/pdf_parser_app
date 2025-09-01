@@ -1,5 +1,5 @@
 """
-Main application window
+Main application window with OCR support
 """
 
 import logging
@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit,
     QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
     QStatusBar, QMenuBar, QMenu, QListWidget, QListWidgetItem,
-    QGroupBox, QGridLayout, QHeaderView, QAbstractItemView
+    QGroupBox, QGridLayout, QHeaderView, QAbstractItemView,
+    QCheckBox, QFrame, QScrollArea
 )
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QMimeData
@@ -31,56 +32,55 @@ from app.pipeline.universal_parser import UniversalParser
 logger = logging.getLogger(__name__)
 
 class ProcessingThread(QThread):
-    """Background thread for PDF processing"""
+    """Background thread for PDF processing with OCR support"""
     
     progress = Signal(int)
     finished = Signal(dict)
     error = Signal(str)
+    ocr_status = Signal(str)
     
-    def __init__(self, pdf_path: str, config: AppConfig):
+    def __init__(self, pdf_path: str, config: AppConfig, use_ocr: bool = True):
         super().__init__()
         self.pdf_path = pdf_path
         self.config = config
+        self.use_ocr = use_ocr
     
     def run(self):
-        """Process PDF file"""
+        """Process PDF file with optional OCR"""
         try:
-            self.progress.emit(10)
+            self.progress.emit(5)
+            self.ocr_status.emit("Инициализация...")
             
-            # Detect text layer
-            has_text, total_chars, error_msg = detect_text_layer(
-                self.pdf_path, 
-                self.config.min_text_length
-            )
+            # Initialize parser with OCR support
+            parser = UniversalParser(use_ocr=self.use_ocr)
             
-            if not has_text:
-                self.error.emit("PDF appears to be scan/image - no text layer detected")
-                return
+            if self.use_ocr:
+                self.ocr_status.emit("OCR включен - улучшенная обработка")
+            else:
+                self.ocr_status.emit("OCR отключен - стандартная обработка")
             
-            self.progress.emit(30)
+            self.progress.emit(15)
             
-            # Extract text and tables
-            text, tables, extraction_info = extract_text_and_tables(self.pdf_path)
+            # Use new parse_pdf_file method with OCR support
+            result = parser.parse_pdf_file(self.pdf_path, enable_ocr=self.use_ocr)
             
-            if not text and not tables:
-                self.error.emit("No text or tables found in PDF")
+            if 'error' in result:
+                self.error.emit(result['error'])
                 return
             
             self.progress.emit(50)
             
-            # Parse text to items
-            parser = UniversalParser()
-            result = parser.parse_document(text, tables)
+            # Extract items from result
             items = result.get('best_items', [])
+            
+            if not items:
+                self.error.emit("Не удалось извлечь товарные позиции из PDF")
+                return
             
             # Add parser information to items
             for item in items:
                 item['parser_used'] = result.get('best_parser', 'unknown')
                 item['supplier_name'] = result.get('parser_results', {}).get('supplier_profile_parser', {}).get('supplier_name', 'Unknown')
-            
-            if not items:
-                self.error.emit("No items could be parsed from PDF")
-                return
             
             self.progress.emit(70)
             
@@ -93,21 +93,23 @@ class ProcessingThread(QThread):
             
             self.progress.emit(90)
             
-            # Prepare result
-            result = {
-                'pdf_path': self.pdf_path,
-                'text': text,
-                'tables': tables,
+            # Prepare result with OCR information
+            result.update({
                 'items': matched_items,
-                'extraction_info': extraction_info
-            }
+                'ocr_used': result.get('ocr_info', {}).get('ocr_additions', 0) > 0,
+                'extraction_quality': result.get('extraction_quality', {}),
+                'document_type': result.get('document_type', {}),
+                'processing_method': 'enhanced_with_ocr' if self.use_ocr else 'standard'
+            })
             
             self.progress.emit(100)
+            self.ocr_status.emit("Обработка завершена")
             self.finished.emit(result)
             
         except Exception as e:
-            logger.error(f"Error processing PDF: {e}")
-            self.error.emit(str(e))
+            error_msg = f"Ошибка обработки PDF: {e}"
+            logger.error(error_msg)
+            self.error.emit(error_msg)
 
 class MainWindow(QMainWindow):
     """Main application window"""
@@ -196,11 +198,51 @@ class MainWindow(QMainWindow):
         
         left_layout.addLayout(button_layout)
         
-        # Status
-        self.file_status_label = QLabel("No files")
-        left_layout.addWidget(self.file_status_label)
+        # OCR Control Panel
+        self.setup_ocr_panel(left_layout)
         
         parent.addWidget(left_widget)
+    
+    def setup_ocr_panel(self, parent_layout):
+        """Setup OCR control panel"""
+        ocr_group = QGroupBox("🔍 OCR Настройки")
+        ocr_layout = QVBoxLayout(ocr_group)
+        
+        # OCR Status
+        self.ocr_status_label = QLabel("OCR: Инициализация...")
+        self.ocr_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        ocr_layout.addWidget(self.ocr_status_label)
+        
+        # OCR Toggle
+        self.ocr_checkbox = QCheckBox("Использовать OCR")
+        self.ocr_checkbox.setChecked(True)
+        self.ocr_checkbox.stateChanged.connect(self.on_ocr_toggled)
+        ocr_layout.addWidget(self.ocr_checkbox)
+        
+        # OCR Info
+        self.ocr_info_label = QLabel("OCR улучшает качество парсинга")
+        self.ocr_info_label.setStyleSheet("color: blue; font-size: 10px;")
+        self.ocr_info_label.setWordWrap(True)
+        ocr_layout.addWidget(self.ocr_info_label)
+        
+        # OCR Languages
+        languages_layout = QHBoxLayout()
+        languages_layout.addWidget(QLabel("Языки:"))
+        self.ru_lang_checkbox = QCheckBox("RU")
+        self.ru_lang_checkbox.setChecked(True)
+        self.en_lang_checkbox = QCheckBox("EN")
+        self.en_lang_checkbox.setChecked(True)
+        languages_layout.addWidget(self.ru_lang_checkbox)
+        languages_layout.addWidget(self.en_lang_checkbox)
+        ocr_layout.addLayout(languages_layout)
+        
+        # OCR Test Button
+        test_ocr_button = QPushButton("Тест OCR")
+        test_ocr_button.clicked.connect(self.test_ocr_functionality)
+        test_ocr_button.setStyleSheet("background-color: #4CAF50; color: white;")
+        ocr_layout.addWidget(test_ocr_button)
+        
+        parent_layout.addWidget(ocr_group)
     
     def setup_right_panel(self, parent):
         """Setup right panel with tabs"""
@@ -308,6 +350,11 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         info_layout.addWidget(self.progress_bar)
         
+        # OCR Status
+        self.ocr_status_label = QLabel("OCR статус: Неизвестно")
+        self.ocr_status_label.setFont(QFont("Arial", 10))
+        info_layout.addWidget(self.ocr_status_label)
+
         info_layout.addStretch()
         
         self.tab_widget.addTab(info_widget, "Document Info")
@@ -316,6 +363,12 @@ class MainWindow(QMainWindow):
         """Setup bottom action buttons"""
         button_layout = QHBoxLayout()
         
+        # OCR Toggle
+        self.ocr_checkbox = QCheckBox("Использовать OCR для обработки")
+        self.ocr_checkbox.setChecked(self.config.use_ocr)
+        self.ocr_checkbox.stateChanged.connect(self.on_ocr_toggle)
+        button_layout.addWidget(self.ocr_checkbox)
+
         # Export button
         self.export_button = QPushButton("Export to Excel")
         self.export_button.clicked.connect(self.export_to_excel)
@@ -429,20 +482,12 @@ class MainWindow(QMainWindow):
             self.process_pdf_file(file_path)
     
     def process_pdf_file(self, pdf_path: str):
-        """Process PDF file"""
+        """Process PDF file with OCR support"""
         self.current_document = pdf_path
-        self.status_bar.showMessage(f"Processing {Path(pdf_path).name}...")
+        self.status_bar.showMessage(f"Обработка {Path(pdf_path).name}...")
         
-        # Create and start processing thread
-        self.processing_thread = ProcessingThread(pdf_path, self.config)
-        self.processing_thread.progress.connect(self.progress_bar.setValue)
-        self.processing_thread.finished.connect(self.on_processing_finished)
-        self.processing_thread.error.connect(self.on_processing_error)
-        
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-        
-        self.processing_thread.start()
+        # Use new OCR-enabled processing method
+        self.process_file_with_ocr(pdf_path)
     
     def on_processing_finished(self, result: Dict[str, Any]):
         """Handle processing completion"""
@@ -667,17 +712,143 @@ class MainWindow(QMainWindow):
             "PDF Parser Application v1.0.0\n\n"
             "A tool for parsing PDF documents and extracting structured data."
         )
+
+    def on_ocr_toggle(self, state):
+        """Handle OCR toggle state change"""
+        self.config.use_ocr = state == Qt.Checked
+        logger.info(f"OCR toggled to: {self.config.use_ocr}")
+
+    def on_ocr_toggled(self, state):
+        """Handle OCR checkbox toggle"""
+        use_ocr = state == Qt.Checked
+        self.parser.toggle_ocr(use_ocr)
+        
+        if use_ocr:
+            self.ocr_status_label.setText("OCR: Включен")
+            self.ocr_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.ocr_info_label.setText("OCR включен - улучшенное качество парсинга")
+        else:
+            self.ocr_status_label.setText("OCR: Отключен")
+            self.ocr_status_label.setStyleSheet("color: red; font-weight: bold;")
+            self.ocr_info_label.setText("OCR отключен - стандартное качество")
     
-    def closeEvent(self, event):
-        """Handle application close"""
-        # Stop file monitoring
-        self.file_ingester.stop_monitoring()
-        
-        # Close database connections
+    def test_ocr_functionality(self):
+        """Test OCR functionality"""
         try:
-            from app.db.database import close_database
-            close_database()
-        except:
-            pass
+            # Get OCR status
+            status = self.parser.get_ocr_status()
+            
+            if status['status'] == 'active':
+                QMessageBox.information(
+                    self, 
+                    "OCR Тест", 
+                    f"OCR работает корректно!\n"
+                    f"Статус: {status['status']}\n"
+                    f"Языки: {', '.join(status['languages'])}\n"
+                    f"Enhanced Extractor: {'Доступен' if status['enhanced_extractor_available'] else 'Недоступен'}"
+                )
+            else:
+                QMessageBox.warning(
+                    self, 
+                    "OCR Тест", 
+                    f"OCR не активен!\n"
+                    f"Статус: {status['status']}\n"
+                    f"Проверьте установку зависимостей"
+                )
+                
+        except Exception as e:
+            QMessageBox.critical(
+                self, 
+                "OCR Ошибка", 
+                f"Ошибка тестирования OCR:\n{str(e)}"
+            )
+    
+    def update_ocr_status(self, status_text: str):
+        """Update OCR status display"""
+        self.ocr_status_label.setText(f"OCR: {status_text}")
+    
+    def get_ocr_languages(self) -> List[str]:
+        """Get selected OCR languages"""
+        languages = []
+        if self.ru_lang_checkbox.isChecked():
+            languages.append('ru')
+        if self.en_lang_checkbox.isChecked():
+            languages.append('en')
+        return languages if languages else ['ru', 'en']
+    
+    def process_file_with_ocr(self, file_path: str):
+        """Process file with OCR support"""
+        try:
+            # Get OCR settings
+            use_ocr = self.ocr_checkbox.isChecked()
+            languages = self.get_ocr_languages()
+            
+            # Create processing thread
+            self.processing_thread = ProcessingThread(
+                file_path, 
+                self.config, 
+                use_ocr=use_ocr
+            )
+            
+            # Connect signals
+            self.processing_thread.progress.connect(self.update_progress)
+            self.processing_thread.finished.connect(self.on_processing_finished)
+            self.processing_thread.error.connect(self.on_processing_error)
+            self.processing_thread.ocr_status.connect(self.update_ocr_status)
+            
+            # Start processing
+            self.processing_thread.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Processing Error", f"Failed to start processing: {e}")
+    
+    def on_processing_finished(self, result: Dict[str, Any]):
+        """Handle processing completion"""
+        try:
+            # Update current document and items
+            self.current_document = result.get('pdf_path', '')
+            self.current_items = result.get('items', [])
+            
+            # Display results
+            self.display_items(self.current_items)
+            
+            # Show OCR information if used
+            if result.get('ocr_used', False):
+                ocr_info = result.get('ocr_info', {})
+                QMessageBox.information(
+                    self, 
+                    "OCR Улучшения", 
+                    f"OCR улучшил обработку документа!\n"
+                    f"Добавлено текстовых блоков: {ocr_info.get('ocr_additions', 0)}\n"
+                    f"Общее качество: {result.get('extraction_quality', {}).get('overall', 0):.1%}"
+                )
+            
+            # Show quality assessment
+            quality = result.get('extraction_quality', {})
+            if quality:
+                self.show_quality_report(quality)
+                
+        except Exception as e:
+            logger.error(f"Error handling processing completion: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to handle results: {e}")
+    
+    def show_quality_report(self, quality: Dict[str, Any]):
+        """Show quality assessment report"""
+        report = f"📊 Отчет о качестве извлечения:\n\n"
+        report += f"Общее качество: {quality.get('overall', 0):.1%}\n"
+        report += f"Качество текста: {quality.get('text_quality', 0):.1%}\n"
+        report += f"Качество таблиц: {quality.get('table_quality', 0):.1%}\n\n"
         
-        event.accept()
+        issues = quality.get('issues', [])
+        if issues:
+            report += "⚠️ Проблемы:\n"
+            for issue in issues:
+                report += f"• {issue}\n"
+        
+        recommendations = quality.get('recommendations', [])
+        if recommendations:
+            report += "\n💡 Рекомендации:\n"
+            for rec in recommendations:
+                report += f"• {rec}\n"
+        
+        QMessageBox.information(self, "Отчет о качестве", report)

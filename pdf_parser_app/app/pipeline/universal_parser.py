@@ -1,5 +1,5 @@
 """
-Универсальный парсер для всех типов документов
+Универсальный парсер для всех типов документов с поддержкой OCR
 """
 
 import re
@@ -10,20 +10,34 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 class UniversalParser:
-    """Универсальный парсер для всех типов документов"""
+    """Универсальный парсер для всех типов документов с поддержкой OCR"""
     
-    def __init__(self):
+    def __init__(self, use_ocr: bool = True, ocr_languages: List[str] = None):
         from app.pipeline.commercial_parser import CommercialProposalParser
         from app.pipeline.invoice_parser import InvoiceParser
         from app.pipeline.competitive_parser import CompetitiveParser
         from app.pipeline.table_extractor import TableExtractor
         from app.pipeline.precise_table_parser import PreciseTableParser
         
+        # Основные парсеры
         self.commercial_parser = CommercialProposalParser()
         self.invoice_parser = InvoiceParser()
         self.competitive_parser = CompetitiveParser()
         self.table_extractor = TableExtractor()
         self.precise_table_parser = PreciseTableParser()
+        
+        # OCR поддержка
+        self.use_ocr = use_ocr
+        self.enhanced_extractor = None
+        
+        if self.use_ocr:
+            try:
+                from app.pipeline.enhanced_extractor import EnhancedExtractor
+                self.enhanced_extractor = EnhancedExtractor(use_ocr=True, ocr_languages=ocr_languages)
+                logger.info("OCR поддержка инициализирована в UniversalParser")
+            except Exception as e:
+                logger.warning(f"Не удалось инициализировать OCR: {e}")
+                self.use_ocr = False
         
         # Инициализируем менеджер профилей поставщиков
         try:
@@ -59,13 +73,14 @@ class UniversalParser:
             )
         ]
     
-    def parse_document(self, text: str, tables: List[pd.DataFrame] = None) -> Dict[str, Any]:
+    def parse_document(self, text: str, tables: List[pd.DataFrame] = None, pdf_path: str = None) -> Dict[str, Any]:
         """
-        Универсальный парсинг документа
+        Универсальный парсинг документа с поддержкой OCR
         
         Args:
             text: Текст документа
             tables: Извлеченные таблицы
+            pdf_path: Путь к PDF файлу (для OCR улучшения)
             
         Returns:
             Словарь с результатами всех парсеров и рекомендациями
@@ -78,8 +93,33 @@ class UniversalParser:
             'best_parser': None,
             'best_items': None,
             'document_type': None,
+            'ocr_info': None,
+            'quality_assessment': None,
             'recommendations': []
         }
+        
+        # OCR улучшение текста, если доступно
+        if self.use_ocr and self.enhanced_extractor and pdf_path:
+            try:
+                logger.info("Применяем OCR улучшение к тексту")
+                enhanced_text, ocr_info = self.enhanced_extractor.ocr_processor.enhance_pdf_text(pdf_path, text)
+                
+                if ocr_info['ocr_additions'] > 0:
+                    text = enhanced_text
+                    results['ocr_info'] = ocr_info
+                    logger.info(f"OCR улучшил текст: добавлено {ocr_info['ocr_additions']} блоков")
+                
+                # Определяем тип документа с помощью OCR
+                doc_type = self.enhanced_extractor.ocr_processor.detect_document_type(text)
+                results['document_type'] = doc_type
+                
+                # Валидируем качество данных
+                validation = self.enhanced_extractor.ocr_processor.validate_extracted_data(text, tables)
+                results['quality_assessment'] = validation
+                
+            except Exception as e:
+                logger.warning(f"Ошибка OCR улучшения: {e}")
+                results['ocr_info'] = {'error': str(e)}
         
         # Парсим всеми парсерами
         try:
@@ -858,19 +898,108 @@ class UniversalParser:
             return results['best_items']
         return []
     
-    def get_parser_summary(self, results: Dict[str, Any]) -> str:
-        """Получение краткого отчета по парсерам"""
-        summary = []
+    def parse_pdf_file(self, pdf_path: str, enable_ocr: bool = True) -> Dict[str, Any]:
+        """
+        Парсинг PDF файла с поддержкой OCR
         
-        for parser_name in ['commercial', 'invoice', 'competitive', 'universal']:
-            parser_result = results[f'{parser_name}_parser']
-            if parser_result and not isinstance(parser_result, dict):
-                count = parser_result.get('count', 0)
-                total_cost = parser_result.get('total_cost', 0)
-                avg_confidence = parser_result.get('avg_confidence', 0)
+        Args:
+            pdf_path: Путь к PDF файлу
+            enable_ocr: Включить ли OCR обработку
+            
+        Returns:
+            Словарь с результатами парсинга
+        """
+        try:
+            logger.info(f"Начинаем парсинг PDF файла: {pdf_path}")
+            
+            # Используем улучшенный экстрактор, если доступен
+            if self.use_ocr and self.enhanced_extractor and enable_ocr:
+                logger.info("Используем улучшенный экстрактор с OCR")
+                text, tables, extraction_info = self.enhanced_extractor.extract_text_and_tables(pdf_path)
                 
-                summary.append(f"{parser_name.title()}: {count} позиций, {total_cost:,.2f} руб, уверенность {avg_confidence:.2f}")
+                # Добавляем информацию об извлечении
+                results = {
+                    'extraction_info': extraction_info,
+                    'pdf_path': pdf_path,
+                    'file_size': extraction_info.get('file_size', 0),
+                    'processing_time': extraction_info.get('processing_time', 0)
+                }
+                
             else:
-                summary.append(f"{parser_name.title()}: ошибка или нет данных")
+                # Используем стандартный экстрактор
+                logger.info("Используем стандартный экстрактор")
+                from app.pipeline.extractor import extract_text_and_tables
+                text, tables, extraction_info = extract_text_and_tables(pdf_path)
+                
+                results = {
+                    'extraction_info': extraction_info,
+                    'pdf_path': pdf_path
+                }
+            
+            # Парсим документ
+            parse_results = self.parse_document(text, tables, pdf_path)
+            results.update(parse_results)
+            
+            # Добавляем метаданные
+            results['file_info'] = {
+                'path': pdf_path,
+                'name': pdf_path.split('/')[-1],
+                'extraction_method': 'enhanced_with_ocr' if (self.use_ocr and self.enhanced_extractor and enable_ocr) else 'standard',
+                'ocr_used': results.get('ocr_info', {}).get('ocr_additions', 0) > 0
+            }
+            
+            # Генерируем рекомендации
+            results['recommendations'] = self._generate_recommendations(results)
+            
+            # Добавляем качество извлечения
+            if 'quality_assessment' in results:
+                quality = results['quality_assessment']
+                results['extraction_quality'] = {
+                    'overall': quality.get('overall_quality', 0),
+                    'text_quality': quality.get('text_quality', 0),
+                    'table_quality': quality.get('table_quality', 0),
+                    'issues': quality.get('issues', []),
+                    'recommendations': quality.get('recommendations', [])
+                }
+            
+            logger.info(f"PDF файл успешно обработан: {len(text)} символов, {len(tables)} таблиц")
+            return results
+            
+        except Exception as e:
+            error_msg = f"Ошибка парсинга PDF файла {pdf_path}: {e}"
+            logger.error(error_msg)
+            return {
+                'error': error_msg,
+                'pdf_path': pdf_path,
+                'extraction_info': {'errors': [error_msg]},
+                'recommendations': ['❌ Ошибка обработки файла', '💡 Проверьте формат и доступность файла']
+            }
+    
+    def get_ocr_status(self) -> Dict[str, Any]:
+        """Получение статуса OCR"""
+        return {
+            'ocr_enabled': self.use_ocr,
+            'enhanced_extractor_available': self.enhanced_extractor is not None,
+            'languages': self.enhanced_extractor.ocr_processor.languages if self.enhanced_extractor else [],
+            'status': 'active' if (self.use_ocr and self.enhanced_extractor) else 'disabled'
+        }
+    
+    def toggle_ocr(self, enable: bool) -> bool:
+        """Включение/выключение OCR"""
+        if enable and not self.use_ocr:
+            try:
+                from app.pipeline.enhanced_extractor import EnhancedExtractor
+                self.enhanced_extractor = EnhancedExtractor(use_ocr=True)
+                self.use_ocr = True
+                logger.info("OCR включен")
+                return True
+            except Exception as e:
+                logger.error(f"Не удалось включить OCR: {e}")
+                return False
+        elif not enable and self.use_ocr:
+            self.use_ocr = False
+            self.enhanced_extractor = None
+            logger.info("OCR отключен")
+            return True
         
-        return " | ".join(summary)
+        return True
